@@ -2,10 +2,6 @@ import inspect
 
 if not hasattr(inspect, "getargspec"):
     def getargspec(func):
-        """
-        Возвращает кортеж (args, varargs, varkw, defaults),
-        совместимый со старым inspect.getargspec.
-        """
         spec = inspect.getfullargspec(func)
         return spec.args, spec.varargs, spec.varkw, spec.defaults
     inspect.getargspec = getargspec
@@ -30,6 +26,17 @@ from telegram.ext import (
 from docxtpl import DocxTemplate
 from docx2pdf import convert
 
+PERSISTENT_BUTTONS = ["Главное меню", "Отмена"]
+
+def build_keyboard(rows: list[list[str]]):
+    kb = rows + [PERSISTENT_BUTTONS]
+    return ReplyKeyboardMarkup(
+        kb,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -47,11 +54,7 @@ with open("data/patronymics.json",      encoding="utf-8") as f:
 morph = pymorphy2.MorphAnalyzer()
 
 def to_dative(word: str) -> str:
-    """
-    Склоняет слово в дательный падеж, предпочитая разборы
-    с тэгами Surn, Name или Patr (фамилия, имя, отчество).
-    Всегда возвращает с заглавной буквы.
-    """
+
     parses = morph.parse(word)
     if not parses:
         return word.capitalize()
@@ -74,17 +77,43 @@ def to_dative(word: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.username
     if user not in ALLOWED:
-        await update.message.reply_text("Вы не являетесь пользователем бота.")
+        await update.message.reply_text("У Вас нет доступа к боту")
         return ConversationHandler.END
 
-    files = [f for f in os.listdir("templates") if f.endswith(".docx")]
-    keyboard = ReplyKeyboardMarkup([[fn] for fn in files], one_time_keyboard=True)
-    await update.message.reply_text("Выберите шаблон:", reply_markup=keyboard)
+    markup = ReplyKeyboardMarkup(
+        [["Начать формирование"]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+    await update.message.reply_text(
+        "Нажмите кнопку, чтобы начать формирование документа:",
+        reply_markup=markup
+    )
     return CHOOSING
 
+
 async def choose_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["template"] = update.message.text
-    await update.message.reply_text("Введите фамилию:")
+    text = update.message.text.strip()
+
+    if text == "Начать формирование":
+        files = [f for f in os.listdir("templates") if f.endswith(".docx")]
+        rows = [[fn] for fn in files]
+        markup = ReplyKeyboardMarkup(
+            rows,
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        await update.message.reply_text(
+            "Выберите шаблон документа:",
+            reply_markup=markup
+        )
+        return CHOOSING
+
+    context.user_data["template"] = text
+    await update.message.reply_text(
+        "Отлично. Теперь введите фамилию:",
+        reply_markup=ReplyKeyboardRemove()
+    )
     return SURNAME
 
 async def ask_surname(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,54 +138,60 @@ async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_patronymic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text.lower() != "нет" and text not in PATRONYMICS:
-        await update.message.reply_text("Отчество введено неверно, либо отсутствует в базе. Или напиши «нет»:")
-        return PATRONYMIC
+    context.user_data["patronymic"] = "" if text.lower()=="нет" else text
 
-    # сохраняем отчество (или пусто)
-    context.user_data["patronymic"] = "" if text.lower() == "нет" else text
-
-    # уведомляем и убираем клавиатуру
     await update.message.reply_text(
-        "Ожидайте. Формирую документ…",
+        "Принято! Формирую документ…",
         reply_markup=ReplyKeyboardRemove()
     )
 
-    # готовим шаблон
-    tpl_path = os.path.join("templates", context.user_data["template"])
+    tpl_name = context.user_data["template"]             # e.g. "template1.docx"
+    tpl_path = os.path.join("templates", tpl_name)
     doc = DocxTemplate(tpl_path)
 
-    # raw ФИО
     raw_surname = context.user_data["surname"]
     raw_name    = context.user_data["name"]
     raw_patr    = context.user_data["patronymic"]
-
-    # склоняем в дательный падеж
     surname_datv = to_dative(raw_surname)
     name_datv    = to_dative(raw_name)
     patr_datv    = to_dative(raw_patr) if raw_patr else ""
 
-    # контекст для шаблона
     ctx = {
-        "surname_datv":     surname_datv,
-        "name_datv":        name_datv,
-        "patronymic_datv":  patr_datv,
-        "date":             date.today().strftime("%d.%m.%Y")
+        "surname_datv":    surname_datv,
+        "name_datv":       name_datv,
+        "patronymic_datv": patr_datv,
+        "date":            date.today().strftime("%d.%m.%Y")
     }
 
-    # генерим и конвертим
-    out_docx = f"out_{update.effective_user.id}.docx"
-    out_pdf  = out_docx.replace(".docx", ".pdf")
-
     doc.render(ctx)
+
+    out_dir = "output_docs"
+    os.makedirs(out_dir, exist_ok=True)
+
+    date_str    = date.today().isoformat()
+    base_name   = os.path.splitext(tpl_name)[0]
+    username    = update.effective_user.username or update.effective_user.id
+
+    file_base   = f"{date_str}_{base_name}_{username}"
+
+    out_docx = os.path.join(out_dir, f"{file_base}.docx")
+    out_pdf  = os.path.join(out_dir, f"{file_base}.pdf")
+
     doc.save(out_docx)
     convert(out_docx, out_pdf)
 
-    # отправляем и чистим
-    with open(out_pdf, "rb") as pdf_f:
-        await update.message.reply_document(pdf_f)
-    os.remove(out_docx)
-    os.remove(out_pdf)
+    with open(out_pdf, "rb") as f:
+        await update.message.reply_document(f, filename=f"{file_base}.pdf")
+
+    markup = ReplyKeyboardMarkup(
+        [["Начать формирование"]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    await update.message.reply_text(
+        "Документ готов! Если хотите создать ещё один, нажмите кнопку:",
+        reply_markup=markup
+    )
 
     return ConversationHandler.END
 
@@ -164,16 +199,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отмена. Всего доброго!")
     return ConversationHandler.END
 
-# ─── Запуск ────────────────────────────────────────────────────────────────────
+# Запуск
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+            entry_points=[
+                CommandHandler("start", start),
+                MessageHandler(filters.Regex("^Начать формирование$"), start)
+            ],
         states={
-            CHOOSING:   [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_template)],
-            SURNAME:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_surname)],
-            NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
+            CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_template)],
+            SURNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_surname)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
             PATRONYMIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_patronymic)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
