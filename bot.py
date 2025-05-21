@@ -23,6 +23,22 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+import json
+from datetime import datetime, timedelta
+
+HISTORY_FILE = "data/history.json"
+
+def record_document(username: str, template: str):
+    now = datetime.now().isoformat()
+    entry = {"username": username, "template": template, "timestamp": now}
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = []
+    data.append(entry)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 from docxtpl import DocxTemplate
 from docx2pdf import convert
@@ -73,6 +89,30 @@ def to_dative(word: str) -> str:
         return inf.word.capitalize()
 
     return word.capitalize()
+
+def inflect_word(word: str, case: str) -> str:
+    parses = morph.parse(word)
+    if not parses:
+        return word.capitalize()
+
+    # 1) Ищём «семейный» разбор
+    for p in parses:
+        if set(p.tag.grammemes) & {"Surn","Name","Patr"}:
+            inf = p.inflect({case})
+            if inf:
+                return inf.word.capitalize()
+
+    # 2) Берём первый возможный разбор
+    p0 = parses[0]
+    inf0 = p0.inflect({case})
+    return inf0.word.capitalize() if inf0 else word.capitalize()
+
+def to_dative(word: str) -> str:
+    return inflect_word(word, "datv")
+
+
+def to_genitive(word: str) -> str:
+    return inflect_word(word, "gent")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,14 +194,21 @@ async def ask_patronymic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_name    = context.user_data["name"]
     raw_patr    = context.user_data["patronymic"]
     surname_datv = to_dative(raw_surname)
+    surname_gent = to_genitive(raw_surname)
     name_datv    = to_dative(raw_name)
     patr_datv    = to_dative(raw_patr) if raw_patr else ""
 
     ctx = {
-        "surname_datv":    surname_datv,
-        "name_datv":       name_datv,
-        "patronymic_datv": patr_datv,
-        "date":            date.today().strftime("%d.%m.%Y")
+        "surname":raw_surname,
+        "name":raw_name,
+        "patronymic":raw_patr,
+        "surname_datv": surname_datv,
+        "surname_gent": surname_gent,
+        "name_datv": to_dative(raw_name),
+        "name_gent": to_genitive(raw_name),
+        "patronymic_datv": to_dative(raw_patr),
+        "patronymic_gent": to_genitive(raw_patr),
+        "date": date.today().strftime("%d.%m.%Y"),
     }
 
     doc.render(ctx)
@@ -186,6 +233,9 @@ async def ask_patronymic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(out_pdf, "rb") as f:
         await update.message.reply_document(f, filename=f"{file_base}.pdf")
 
+    username = update.effective_user.username or str(update.effective_user.id)
+    record_document(username, context.user_data["template"])
+
     markup = ReplyKeyboardMarkup(
         [["Начать формирование"]],
         resize_keyboard=True,
@@ -201,6 +251,45 @@ async def ask_patronymic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отмена. Всего доброго!")
     return ConversationHandler.END
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        await update.message.reply_text("История пуста.")
+        return
+
+    now = datetime.now()
+    today = now.date()
+    week_ago = today - timedelta(days=7)
+
+    total = len(data)
+    cnt_today = 0
+    cnt_week = 0
+    by_template = {}
+
+    for entry in data:
+        ts = datetime.fromisoformat(entry["timestamp"])
+        d = ts.date()
+        if d == today:
+            cnt_today += 1
+        if d >= week_ago:
+            cnt_week += 1
+        tpl = entry["template"]
+        by_template[tpl] = by_template.get(tpl, 0) + 1
+
+    lines = [
+        f"📊 Всего документов: {total}",
+        f"🗓 Сегодня: {cnt_today}",
+        f"🗓 За неделю: {cnt_week}",
+        "",
+        "По шаблонам:",
+    ]
+    for tpl, cnt in sorted(by_template.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"  • {tpl}: {cnt}")
+
+    await update.message.reply_text("\n".join(lines))
 
 # Запуск
 def main():
@@ -219,6 +308,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    app.add_handler(CommandHandler("stats", stats))
 
     app.add_handler(conv)
     app.run_polling()
