@@ -5,6 +5,7 @@ if not hasattr(inspect, "getargspec"):
         spec = inspect.getfullargspec(func)
         return spec.args, spec.varargs, spec.varkw, spec.defaults
     inspect.getargspec = getargspec
+import uuid
 
 import os
 import json
@@ -168,11 +169,13 @@ async def ask_patronymic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     out_dir = "output_docs"
     os.makedirs(out_dir, exist_ok=True)
 
-    date_str    = date.today().isoformat()
-    base_name   = os.path.splitext(tpl_name)[0]
-    username    = update.effective_user.username or update.effective_user.id
+    date_str = date.today().isoformat()
+    base_name = os.path.splitext(tpl_name)[0]
+    username = update.effective_user.username or update.effective_user.id
 
-    file_base   = f"{date_str}_{base_name}_{username}"
+    short_id = uuid.uuid4().hex[:6]
+
+    file_base = f"{date_str}_{base_name}_{username}_{short_id}"
 
     out_docx = os.path.join(out_dir, f"{file_base}.docx")
     out_pdf  = os.path.join(out_dir, f"{file_base}.pdf")
